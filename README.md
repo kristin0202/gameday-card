@@ -1,6 +1,6 @@
 # GameDay Card
 
-Lovelace card for the [`espn_gameday`](../ha-espn-gameday) integration. Renders one of four states automatically — offseason countdown, host-site announcement, live show, final picks — plus conditional full-palette takeovers (Washington purple/gold 🐾, Michigan maize/blue 〽️) and a fresh-announcement pulse.
+Lovelace card for the [espn_gameday](https://github.com/kristin0202/ESPN-College-GameDay-Home-Assistant-Integration) integration. Renders one of four states automatically — offseason countdown, host-site announcement, live show, final picks — plus conditional full-palette takeovers (Washington purple/gold 🐾, Michigan maize/blue 〽️) and a fresh-announcement pulse.
 
 ## Install (HACS)
 1. HACS → Frontend → ⋮ → **Custom repositories** → add this repo URL, category **Dashboard** (Plugin).
