@@ -1,0 +1,6 @@
+{
+  "name": "GameDay Card",
+  "filename": "gameday-card.js",
+  "render_readme": true,
+  "homeassistant": "2024.6.0"
+}
