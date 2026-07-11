@@ -132,7 +132,23 @@ class GameDayCard extends HTMLElement {
   }
 
   getCardSize() { return 4; }
-  disconnectedCallback() { this._stopTicker(); }
+  disconnectedCallback() {
+    this._stopTicker();
+    if (this._freshTimer) { clearTimeout(this._freshTimer); this._freshTimer = null; }
+  }
+
+  _freshActive(d) {
+    if (d.fresh?.state !== "on") return false;
+    const until = Date.parse(d.nextShow?.attributes?.fresh_until || "");
+    if (Number.isNaN(until)) return true; // no timestamp: trust the sensor
+    if (Date.now() >= until) return false;
+    if (!this._freshTimer) {
+      // Re-render at expiry so the pulse stops even between integration polls.
+      const delay = Math.min(Math.max(until - Date.now(), 1000), 31 * 60 * 1000);
+      this._freshTimer = setTimeout(() => { this._freshTimer = null; this._render(); }, delay);
+    }
+    return true;
+  }
 
   // ------------------------------------------------------------------
   _entity(suffix, domain = "sensor") {
@@ -210,7 +226,7 @@ class GameDayCard extends HTMLElement {
     const phase = this._phase(d);
     this._currentPhase = phase;
     const p = this._palette(d, phase);
-    const freshOn = d.fresh?.state === "on" && phase === "announced";
+    const freshOn = phase === "announced" && this._freshActive(d);
 
     let body;
     if (phase === "unavailable") body = this._viewUnavailable();
@@ -282,12 +298,15 @@ class GameDayCard extends HTMLElement {
   }
 
   _upNext(d) {
-    const rows = (d.upcoming?.attributes?.schedule || []).slice(0, 3).map((e) => `
+    const rows = (d.upcoming?.attributes?.schedule || []).slice(0, 3).map((e) => {
+      const place = e.city ? `${e.city}${e.state ? ", " + e.state : ""}` : (e.school || "");
+      return `
       <div class="uprow">
         <span class="upwk">WK ${e.week}</span>
-        <span class="upschool">${e.school || ""}</span>
+        <span class="upschool">${place}</span>
         <span class="upmatch">${e.matchup || ""}</span>
-      </div>`).join("");
+      </div>`;
+    }).join("");
     return rows ? `<div class="label" style="margin-top:14px;">Up Next</div>${rows}` : "";
   }
 
@@ -426,4 +445,4 @@ window.customCards.push({
   description: "ESPN College GameDay: countdown, host site (school-themed), picker, final picks, up-next queue.",
 });
 
-console.info("%c GAMEDAY-CARD %c 0.2.0 ", "background:#cc0000;color:#fff;font-weight:700;", "background:#111;color:#fff;");
+console.info("%c GAMEDAY-CARD %c 0.2.1 ", "background:#cc0000;color:#fff;font-weight:700;", "background:#111;color:#fff;");
