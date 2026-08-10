@@ -1,0 +1,15 @@
+{
+  "domain": "espn_gameday",
+  "name": "ESPN College GameDay",
+  "codeowners": [
+    "@kristin"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/kristin/ha-espn-gameday",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/kristin/ha-espn-gameday/issues",
+  "requirements": [],
+  "version": "0.2.2"
+}
