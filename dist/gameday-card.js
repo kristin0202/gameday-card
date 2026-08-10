@@ -140,10 +140,9 @@ class GameDayCard extends HTMLElement {
   _freshActive(d) {
     if (d.fresh?.state !== "on") return false;
     const until = Date.parse(d.nextShow?.attributes?.fresh_until || "");
-    if (Number.isNaN(until)) return true; // no timestamp: trust the sensor
+    if (Number.isNaN(until)) return true;
     if (Date.now() >= until) return false;
     if (!this._freshTimer) {
-      // Re-render at expiry so the pulse stops even between integration polls.
       const delay = Math.min(Math.max(until - Date.now(), 1000), 31 * 60 * 1000);
       this._freshTimer = setTimeout(() => { this._freshTimer = null; this._render(); }, delay);
     }
@@ -225,6 +224,7 @@ class GameDayCard extends HTMLElement {
     const d = this._collect();
     const phase = this._phase(d);
     this._currentPhase = phase;
+    this._lastNextShow = d.nextShow?.state || "";
     const p = this._palette(d, phase);
     const freshOn = phase === "announced" && this._freshActive(d);
 
@@ -262,6 +262,10 @@ class GameDayCard extends HTMLElement {
       .body { padding:16px; }
       .label { font-size:10px; letter-spacing:2px; color:${p.label}; font-weight:700; text-transform:uppercase; }
       .hero { font-size:24px; font-weight:900; margin-top:2px; }
+      .cdstrip { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 12px; margin-bottom:14px; background:${p.chipBg}; border:1px solid ${p.chipBorder}; border-radius:10px; }
+      .cdlabel { font-size:10px; letter-spacing:1.5px; color:${p.label}; font-weight:700; text-transform:uppercase; }
+      .cdcells { font-size:14px; color:${p.subtext}; font-variant-numeric:tabular-nums; }
+      .cdcells b { color:${p.accent}; font-weight:900; font-size:16px; }
       .sub { font-size:13px; color:${p.subtext}; }
       .matchup { margin-top:12px; font-size:15px; font-weight:700; }
       .strip { display:flex; gap:8px; margin-top:14px; }
@@ -295,6 +299,19 @@ class GameDayCard extends HTMLElement {
   _viewUnavailable() {
     return `<div class="label">ESPN GameDay</div>
       <div class="sub" style="margin-top:6px;">Integration data unavailable — check the espn_gameday integration.</div>`;
+  }
+
+  _premiereStrip(d) {
+    const target = Date.parse(d.nextShow?.state || "");
+    if (Number.isNaN(target) || target <= Date.now()) return "";
+    const cd = this._countdown(target);
+    if (!cd) return "";
+    const when = new Date(target).toLocaleDateString([], { month: "short", day: "numeric" });
+    return `
+      <div class="cdstrip">
+        <span class="cdlabel">Kickoff \u00B7 ${when}</span>
+        <span class="cdcells"><b>${cd.d}</b>d <b>${cd.h}</b>h <b>${cd.m}</b>m</span>
+      </div>`;
   }
 
   _upNext(d) {
@@ -370,6 +387,7 @@ class GameDayCard extends HTMLElement {
 
   _viewAnnounced(d, p) {
     return `
+      ${this._premiereStrip(d)}
       ${this._locationHero(d, "GameDay is headed to")}
       ${this._gameStrip(d)}
       ${this._pickerRow(d, p)}
@@ -421,7 +439,10 @@ class GameDayCard extends HTMLElement {
   }
 
   _manageTicker() {
-    if (this._currentPhase === "offseason") {
+    const target = Date.parse(this._lastNextShow || "");
+    const premiereUpcoming = !Number.isNaN(target) && target > Date.now();
+    if (this._currentPhase === "offseason" ||
+        (this._currentPhase === "announced" && premiereUpcoming)) {
       if (!this._ticker) this._ticker = setInterval(() => this._render(), 30000);
     } else {
       this._stopTicker();
@@ -445,4 +466,4 @@ window.customCards.push({
   description: "ESPN College GameDay: countdown, host site (school-themed), picker, final picks, up-next queue.",
 });
 
-console.info("%c GAMEDAY-CARD %c 0.2.1 ", "background:#cc0000;color:#fff;font-weight:700;", "background:#111;color:#fff;");
+console.info("%c GAMEDAY-CARD %c 0.2.2 ", "background:#cc0000;color:#fff;font-weight:700;", "background:#111;color:#fff;");
