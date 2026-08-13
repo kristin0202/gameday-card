@@ -1,6 +1,7 @@
 /**
- * gameday-card v0.2.0 — ESPN College GameDay card for Home Assistant
- * Pairs with the espn_gameday integration (>= 0.2.0).
+ * gameday-card v0.4.0 — ESPN College GameDay card for Home Assistant
+ * Pairs with the espn_gameday integration (>= 0.4.0, for school-name +
+ * poll-ranked matchup strings).
  *
  * Theming: every announced week is painted in the HOST SCHOOL's official
  * colors (from ESPN's team color fields), run through a contrast engine
@@ -14,6 +15,8 @@
  *   show_odds: true
  *   palettes:                # optional per-school pins, lowercase keys
  *     lsu: { primary: "#461D7C", alternate: "#FDD023", badge: "GEAUX" }
+ *   picker_images:           # optional guest-picker portrait pins
+ *     "pat mcafee": https://example.com/mcafee.jpg
  */
 
 const FLAIR = {
@@ -22,6 +25,45 @@ const FLAIR = {
 };
 
 const ESPN_BRAND = { primary: "#cc0000", alternate: "#1a1a1a", badge: "ESPN" };
+
+// ---------------------------------------------------------------------
+// Guest-picker portraits
+//
+// Module-level so the cache survives HA tearing the card down and rebuilding
+// it on every view switch. Misses are cached as null too — otherwise a picker
+// with no article would refetch on each 30s ticker tick.
+// ---------------------------------------------------------------------
+const PICKER_IMAGES = new Map();   // lowercased name -> url | null
+const PICKER_PENDING = new Set();  // lookups in flight
+const PICKER_FAILED = new Set();   // urls that 404'd or failed to decode
+
+/** ESPN disambiguates repeated venue names with a trailing state code —
+ *  "Tiger Stadium (LA)", "Memorial Stadium (Bloomington, IN)". The city/state
+ *  line sits right above it, so the suffix is pure noise here. Only a
+ *  parenthetical that ends in a state code is stripped. */
+function cleanVenue(venue) {
+  return String(venue || "").replace(/\s*\([^()]*\b[A-Z]{2}\)\s*$/, "").trim();
+}
+
+/** Escape for an HTML attribute — picker names and pinned URLs land in one. */
+function attr(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+function wikiThumb(name, onDone) {
+  const key = name.toLowerCase();
+  if (PICKER_IMAGES.has(key) || PICKER_PENDING.has(key)) return;
+  PICKER_PENDING.add(key);
+  const page = encodeURIComponent(name.trim().replace(/\s+/g, "_"));
+  fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${page}`, {
+    headers: { Accept: "application/json" },
+  })
+    .then((r) => (r.ok ? r.json() : null))
+    // Disambiguation pages resolve fine but carry no portrait.
+    .then((j) => PICKER_IMAGES.set(key, j?.type === "standard" ? j?.thumbnail?.source || null : null))
+    .catch(() => PICKER_IMAGES.set(key, null))
+    .finally(() => { PICKER_PENDING.delete(key); onDone(); });
+}
 
 // ---------------------------------------------------------------------
 // Color math
@@ -121,6 +163,10 @@ class GameDayCard extends HTMLElement {
     this._pins = { ...FLAIR };
     for (const [key, val] of Object.entries(config.palettes || {})) {
       this._pins[key.toLowerCase()] = { ...this._pins[key.toLowerCase()], ...val };
+    }
+    this._pickerPins = {};
+    for (const [key, val] of Object.entries(config.picker_images || {})) {
+      this._pickerPins[key.toLowerCase()] = val;
     }
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
   }
@@ -247,33 +293,54 @@ class GameDayCard extends HTMLElement {
           <span class="wordmark" style="${onAir ? "color:#fff;" : `color:${p.wordmark};`}">
             ${onAir ? '<span class="dot"></span>ON AIR' : "COLLEGE GAMEDAY"}
           </span>
+          ${this._headCountdown(d, phase, p)}
           ${badgeHtml}
         </div>
         <div class="body">${body}</div>
       </ha-card>`;
+
+    // Inline onerror would trip a strict script-src CSP; bind it instead.
+    const img = this.shadowRoot.querySelector(".pavatar img");
+    if (img) {
+      img.addEventListener("error", () => {
+        PICKER_FAILED.add(img.dataset.src);
+        this._render();
+      }, { once: true });
+    }
+  }
+
+  /** Time until the show starts. Announced weeks only: offseason leads with its
+   *  own three-tile countdown, and live/picks have nothing to count toward. */
+  _headCountdown(d, phase, p) {
+    if (phase !== "announced") return "";
+    const cd = this._countdown(Date.parse(d.nextShow?.state || ""));
+    if (!cd || (!cd.d && !cd.h && !cd.m)) return "";
+    return `<span class="hcd" style="color:${p.wordmark};"><b>${cd.d}</b>d <b>${cd.h}</b>h <span class="hcdm"><b>${cd.m}</b>m</span></span>`;
   }
 
   _css(p, fresh) {
     return `
-      ha-card { background:${p.bg}; color:${p.text}; overflow:hidden; border-radius:16px; }
-      .head { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; }
+      ha-card { background:${p.bg}; color:${p.text}; overflow:hidden; border-radius:16px; container-type:inline-size; }
+      .head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 16px; }
       .wordmark { font-weight:900; font-style:italic; letter-spacing:.5px; font-size:15px; }
+      .hcd { font-size:12px; font-weight:600; opacity:.85; white-space:nowrap; font-variant-numeric:tabular-nums; }
+      .hcd b { font-weight:900; font-size:14px; }
       .badge { font-weight:800; font-size:10px; padding:3px 7px; border-radius:4px; letter-spacing:1px; }
       .body { padding:16px; }
       .label { font-size:10px; letter-spacing:2px; color:${p.label}; font-weight:700; text-transform:uppercase; }
       .hero { font-size:24px; font-weight:900; margin-top:2px; }
-      .cdstrip { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 12px; margin-bottom:14px; background:${p.chipBg}; border:1px solid ${p.chipBorder}; border-radius:10px; }
-      .cdlabel { font-size:10px; letter-spacing:1.5px; color:${p.label}; font-weight:700; text-transform:uppercase; }
-      .cdcells { font-size:14px; color:${p.subtext}; font-variant-numeric:tabular-nums; }
-      .cdcells b { color:${p.accent}; font-weight:900; font-size:16px; }
       .sub { font-size:13px; color:${p.subtext}; }
       .matchup { margin-top:12px; font-size:15px; font-weight:700; }
       .strip { display:flex; gap:8px; margin-top:14px; }
       .chip { flex:1; background:${p.chipBg}; border:1px solid ${p.chipBorder}; border-radius:10px; padding:8px 4px; text-align:center; }
       .chip .v { font-size:14px; font-weight:800; }
       .chip .k { font-size:9px; letter-spacing:1.5px; color:${p.label}; margin-top:2px; text-transform:uppercase; }
-      .picker { display:flex; align-items:center; gap:10px; margin-top:14px; background:${p.chipBg}; border:1px solid ${p.chipBorder}; border-radius:10px; padding:10px 12px; }
-      .avatar { width:34px; height:34px; border-radius:50%; background:${p.badgeBg}; color:${p.badgeText}; display:flex; align-items:center; justify-content:center; font-size:16px; flex:none; }
+      .locrow { display:grid; grid-template-columns:2fr 1fr; gap:12px; align-items:start; }
+      .ptile { background:${p.chipBg}; border:1px solid ${p.chipBorder}; border-radius:10px; padding:12px 8px; text-align:center; }
+      .ptile .name { font-weight:800; font-size:13px; margin-top:3px; overflow-wrap:anywhere; }
+      .ptile .label { letter-spacing:1px; }
+      .pavatar { width:56px; height:56px; border-radius:50%; margin:0 auto 8px; background:${p.badgeBg}; color:${p.badgeText}; display:flex; align-items:center; justify-content:center; font-size:24px; overflow:hidden; }
+      .pavatar img { width:100%; height:100%; object-fit:cover; display:block; }
       .cd { flex:1; background:${p.chipBg}; border:1px solid ${p.chipBorder}; border-radius:12px; padding:12px 4px; text-align:center; }
       .cd .n { font-size:26px; font-weight:900; color:${p.accent}; font-variant-numeric:tabular-nums; }
       .cd .u { font-size:9px; letter-spacing:2px; color:${p.label}; text-transform:uppercase; margin-top:2px; }
@@ -292,6 +359,12 @@ class GameDayCard extends HTMLElement {
       @keyframes gd-fresh { 0%{box-shadow:0 0 0 0 rgba(255,46,46,.6)} 100%{box-shadow:0 0 0 14px rgba(255,46,46,0)} }
       ${fresh ? "ha-card.fresh { animation:gd-fresh 1.6s ease-out infinite; }" : ""}
       @media (prefers-reduced-motion: reduce) { .dot, ha-card.fresh { animation:none; } }
+      /* Container, not viewport: the card sits in a sections grid column, so
+         screen width says nothing about how wide the card actually is. */
+      @container (max-width: 320px) {
+        .locrow { grid-template-columns:1fr; }
+        .hcdm { display:none; }
+      }
     `;
   }
 
@@ -299,19 +372,6 @@ class GameDayCard extends HTMLElement {
   _viewUnavailable() {
     return `<div class="label">ESPN GameDay</div>
       <div class="sub" style="margin-top:6px;">Integration data unavailable — check the espn_gameday integration.</div>`;
-  }
-
-  _premiereStrip(d) {
-    const target = Date.parse(d.nextShow?.state || "");
-    if (Number.isNaN(target) || target <= Date.now()) return "";
-    const cd = this._countdown(target);
-    if (!cd) return "";
-    const when = new Date(target).toLocaleDateString([], { month: "short", day: "numeric" });
-    return `
-      <div class="cdstrip">
-        <span class="cdlabel">Kickoff \u00B7 ${when}</span>
-        <span class="cdcells"><b>${cd.d}</b>d <b>${cd.h}</b>h <b>${cd.m}</b>m</span>
-      </div>`;
   }
 
   _upNext(d) {
@@ -365,13 +425,36 @@ class GameDayCard extends HTMLElement {
     return `<div class="matchup">${a.matchup}</div><div class="strip">${chips}</div>`;
   }
 
-  _pickerRow(d, p) {
-    const name = d.picker?.state && !["TBA", "unknown", "unavailable"].includes(d.picker.state)
-      ? d.picker.state : null;
-    return `<div class="picker">
-      <div class="avatar">${name ? "\u{1F3A4}" : "\u2753"}</div>
-      <div><div class="label">Guest Picker</div>
-      <div style="font-weight:800;${name ? "" : `color:${p.subtext};`}">${name || "TBA"}</div></div>
+  /** Config pin -> Wikipedia thumbnail -> avatar. A pinned URL that fails to
+   *  load falls through to the lookup rather than leaving a broken tile. */
+  _pickerPortrait(name) {
+    const key = name.toLowerCase();
+    let src = this._pickerPins[key];
+    if (!src || PICKER_FAILED.has(src)) {
+      src = PICKER_IMAGES.has(key) ? PICKER_IMAGES.get(key) : null;
+      if (!PICKER_IMAGES.has(key)) wikiThumb(name, () => this._render());
+    }
+    return src && !PICKER_FAILED.has(src) ? src : null;
+  }
+
+  _pickerTile(d, p) {
+    const raw = d.picker?.state;
+    const name = raw && !["TBA", "unknown", "unavailable"].includes(raw) ? raw : null;
+    const src = name ? this._pickerPortrait(name) : null;
+    const face = src
+      ? `<img src="${attr(src)}" data-src="${attr(src)}" alt="${attr(name)}">`
+      : (name ? "\u{1F3A4}" : "\u2753");
+    return `<div class="ptile">
+      <div class="pavatar">${face}</div>
+      <div class="label">Guest Picker</div>
+      <div class="name" style="${name ? "" : `color:${p.subtext};`}">${name || "TBA"}</div>
+    </div>`;
+  }
+
+  _locationRow(d, p, verb, note = "") {
+    return `<div class="locrow">
+      <div>${this._locationHero(d, verb)}${note}</div>
+      ${this._pickerTile(d, p)}
     </div>`;
   }
 
@@ -382,15 +465,13 @@ class GameDayCard extends HTMLElement {
     return `
       <div class="label">${verb}</div>
       <div class="hero">${(cityLine || school).toUpperCase()}</div>
-      <div class="sub">${[a.venue, school].filter(Boolean).join(" \u00B7 ")}</div>`;
+      <div class="sub">${[cleanVenue(a.venue), school].filter(Boolean).join(" \u00B7 ")}</div>`;
   }
 
   _viewAnnounced(d, p) {
     return `
-      ${this._premiereStrip(d)}
-      ${this._locationHero(d, "GameDay is headed to")}
+      ${this._locationRow(d, p, "GameDay is headed to")}
       ${this._gameStrip(d)}
-      ${this._pickerRow(d, p)}
       ${this._upNext(d)}`;
   }
 
@@ -399,10 +480,9 @@ class GameDayCard extends HTMLElement {
     const endStr = Number.isNaN(end) ? "" :
       ` \u00B7 show ends ${new Date(end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
     return `
-      ${this._locationHero(d, "Live from")}
-      <div class="sub" style="margin-top:4px;">Picks in the final segment${endStr}</div>
-      ${this._gameStrip(d)}
-      ${this._pickerRow(d, p)}`;
+      ${this._locationRow(d, p, "Live from",
+        `<div class="sub" style="margin-top:4px;">Picks in the final segment${endStr}</div>`)}
+      ${this._gameStrip(d)}`;
   }
 
   _viewPicks(d, p) {
@@ -466,4 +546,4 @@ window.customCards.push({
   description: "ESPN College GameDay: countdown, host site (school-themed), picker, final picks, up-next queue.",
 });
 
-console.info("%c GAMEDAY-CARD %c 0.2.2 ", "background:#cc0000;color:#fff;font-weight:700;", "background:#111;color:#fff;");
+console.info("%c GAMEDAY-CARD %c 0.4.0 ", "background:#cc0000;color:#fff;font-weight:700;", "background:#111;color:#fff;");
