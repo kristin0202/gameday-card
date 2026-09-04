@@ -1,5 +1,5 @@
 /**
- * gameday-card v0.4.0 — ESPN College GameDay card for Home Assistant
+ * gameday-card v0.5.0 — ESPN College GameDay card for Home Assistant
  * Pairs with the espn_gameday integration (>= 0.4.0, for school-name +
  * poll-ranked matchup strings).
  *
@@ -36,6 +36,36 @@ const ESPN_BRAND = { primary: "#cc0000", alternate: "#1a1a1a", badge: "ESPN" };
 const PICKER_IMAGES = new Map();   // lowercased name -> url | null
 const PICKER_PENDING = new Set();  // lookups in flight
 const PICKER_FAILED = new Set();   // urls that 404'd or failed to decode
+const PICKER_SMALLER = new Map();  // upgraded url -> the API's original url
+
+// Wikipedia lead images are whatever editors picked -- a stage shot as often
+// as a headshot -- so a centred square crop lands on the torso. Measured
+// across a spread of real subjects (tight bust to full-body, aspect 0.61-1.00)
+// the face centre sits in a tight band 23-29% down the frame regardless of
+// framing, because of the photographic headroom convention. Crop to that band
+// instead of the geometric centre, and zoom past `cover` so the head actually
+// fills the tile.
+const FACE_Y = 0.26;     // face centre, as a fraction of image height
+const FACE_ZOOM = 1.45;  // scale relative to a plain `cover` fit
+
+// Wikimedia rejects arbitrary thumbnail widths (HTTP 400) -- only a standard
+// set is served. 500 is on that list; the API hands back 330 by default.
+const THUMB_W = 500;
+
+/** Geometry for the portrait inside a `box`x`box` tile: big enough to cover,
+ *  zoomed, and shifted so the face band lands near the tile's centre. Returns
+ *  null for dimensions we cannot frame. */
+function faceFrame(box, naturalW, naturalH) {
+  if (!box || !naturalW || !naturalH) return null;
+  const aspect = naturalW / naturalH;
+  const coverH = aspect < 1 ? box / aspect : box;
+  const h = coverH * FACE_ZOOM;
+  const w = h * aspect;
+  // Clamped so the tile is always fully covered -- never expose a gap.
+  const top = Math.max(box - h, Math.min(0, box / 2 - FACE_Y * h));
+  const left = Math.max(box - w, Math.min(0, (box - w) / 2));
+  return { w, h, top, left };
+}
 
 /** ESPN disambiguates repeated venue names with a trailing state code —
  *  "Tiger Stadium (LA)", "Memorial Stadium (Bloomington, IN)". The city/state
@@ -50,6 +80,15 @@ function attr(s) {
   return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 
+/** Ask Wikimedia for a wider rendering of the same file, remembering the
+ *  original so a rejected width degrades to the working URL, not to no image. */
+function upgradeThumb(url) {
+  if (!url) return null;
+  const bigger = url.replace(/\/\d+px-/, `/${THUMB_W}px-`);
+  if (bigger !== url) PICKER_SMALLER.set(bigger, url);
+  return bigger;
+}
+
 function wikiThumb(name, onDone) {
   const key = name.toLowerCase();
   if (PICKER_IMAGES.has(key) || PICKER_PENDING.has(key)) return;
@@ -60,7 +99,8 @@ function wikiThumb(name, onDone) {
   })
     .then((r) => (r.ok ? r.json() : null))
     // Disambiguation pages resolve fine but carry no portrait.
-    .then((j) => PICKER_IMAGES.set(key, j?.type === "standard" ? j?.thumbnail?.source || null : null))
+    .then((j) => PICKER_IMAGES.set(key, upgradeThumb(
+      j?.type === "standard" ? j?.thumbnail?.source || null : null)))
     .catch(() => PICKER_IMAGES.set(key, null))
     .finally(() => { PICKER_PENDING.delete(key); onDone(); });
 }
@@ -303,10 +343,35 @@ class GameDayCard extends HTMLElement {
     const img = this.shadowRoot.querySelector(".pavatar img");
     if (img) {
       img.addEventListener("error", () => {
+        // A width Wikimedia will not serve should cost us sharpness, not the
+        // portrait: retry at the size the API originally handed back.
+        const smaller = PICKER_SMALLER.get(img.dataset.src);
+        if (smaller && !PICKER_FAILED.has(smaller)) {
+          for (const [k, v] of PICKER_IMAGES) {
+            if (v === img.dataset.src) PICKER_IMAGES.set(k, smaller);
+          }
+        }
         PICKER_FAILED.add(img.dataset.src);
         this._render();
       }, { once: true });
+      // A real headshot is already framed on the face; only re-crop the
+      // Wikipedia fallback. A cached image can be decoded before this binds.
+      if (!img.dataset.headshot) {
+        if (img.complete && img.naturalWidth) this._framePortrait(img);
+        else img.addEventListener("load", () => this._framePortrait(img), { once: true });
+      }
     }
+  }
+
+  /** Size and offset the portrait so the subject's face lands in the tile,
+   *  rather than whatever the geometric centre of the photo happens to be. */
+  _framePortrait(img) {
+    const f = faceFrame(img.parentElement?.clientHeight || 0, img.naturalWidth, img.naturalHeight);
+    if (!f) return;
+    img.style.width = `${f.w}px`;
+    img.style.height = `${f.h}px`;
+    img.style.top = `${f.top}px`;
+    img.style.left = `${f.left}px`;
   }
 
   /** Time until the show starts. Announced weeks only: offseason leads with its
@@ -339,8 +404,11 @@ class GameDayCard extends HTMLElement {
       .ptile { background:${p.chipBg}; border:1px solid ${p.chipBorder}; border-radius:10px; padding:12px 8px; text-align:center; }
       .ptile .name { font-weight:800; font-size:13px; margin-top:3px; overflow-wrap:anywhere; }
       .ptile .label { letter-spacing:1px; }
-      .pavatar { width:56px; height:56px; border-radius:50%; margin:0 auto 8px; background:${p.badgeBg}; color:${p.badgeText}; display:flex; align-items:center; justify-content:center; font-size:24px; overflow:hidden; }
-      .pavatar img { width:100%; height:100%; object-fit:cover; display:block; }
+      .pavatar { position:relative; width:56px; height:56px; border-radius:50%; margin:0 auto 8px; background:${p.badgeBg}; color:${p.badgeText}; display:flex; align-items:center; justify-content:center; font-size:24px; overflow:hidden; }
+      /* Fallback framing if the image never loads far enough to be measured:
+         top-biased, because faces sit high in the frame. JS replaces these
+         with an exact crop once naturalWidth/Height are known. */
+      .pavatar img { position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; object-position:50% 0%; display:block; }
       .cd { flex:1; background:${p.chipBg}; border:1px solid ${p.chipBorder}; border-radius:12px; padding:12px 4px; text-align:center; }
       .cd .n { font-size:26px; font-weight:900; color:${p.accent}; font-variant-numeric:tabular-nums; }
       .cd .u { font-size:9px; letter-spacing:2px; color:${p.label}; text-transform:uppercase; margin-top:2px; }
@@ -425,11 +493,13 @@ class GameDayCard extends HTMLElement {
     return `<div class="matchup">${a.matchup}</div><div class="strip">${chips}</div>`;
   }
 
-  /** Config pin -> Wikipedia thumbnail -> avatar. A pinned URL that fails to
-   *  load falls through to the lookup rather than leaving a broken tile. */
-  _pickerPortrait(name) {
+  /** Config pin -> integration headshot -> Wikipedia thumbnail. Any source
+   *  that fails to load falls through to the next rather than leaving a
+   *  broken tile. */
+  _pickerPortrait(name, supplied = null) {
     const key = name.toLowerCase();
     let src = this._pickerPins[key];
+    if (!src || PICKER_FAILED.has(src)) src = supplied;
     if (!src || PICKER_FAILED.has(src)) {
       src = PICKER_IMAGES.has(key) ? PICKER_IMAGES.get(key) : null;
       if (!PICKER_IMAGES.has(key)) wikiThumb(name, () => this._render());
@@ -440,9 +510,15 @@ class GameDayCard extends HTMLElement {
   _pickerTile(d, p) {
     const raw = d.picker?.state;
     const name = raw && !["TBA", "unknown", "unavailable"].includes(raw) ? raw : null;
-    const src = name ? this._pickerPortrait(name) : null;
+    // The integration resolves a genuine headshot where it can -- ESPN for
+    // athletes, Deezer for musicians -- and hands it over here. Those are
+    // already framed on the face, so they are marked and left alone; only the
+    // Wikipedia fallback, which is often a full-body shot, gets faceFrame().
+    const supplied = d.picker?.attributes?.image || null;
+    const src = name ? this._pickerPortrait(name, supplied) : null;
+    const needsFraming = !!src && src !== supplied && src !== this._pickerPins[name?.toLowerCase()];
     const face = src
-      ? `<img src="${attr(src)}" data-src="${attr(src)}" alt="${attr(name)}">`
+      ? `<img src="${attr(src)}" data-src="${attr(src)}" alt="${attr(name)}"${needsFraming ? "" : ' data-headshot="1"'}>`
       : (name ? "\u{1F3A4}" : "\u2753");
     return `<div class="ptile">
       <div class="pavatar">${face}</div>
@@ -546,4 +622,4 @@ window.customCards.push({
   description: "ESPN College GameDay: countdown, host site (school-themed), picker, final picks, up-next queue.",
 });
 
-console.info("%c GAMEDAY-CARD %c 0.4.0 ", "background:#cc0000;color:#fff;font-weight:700;", "background:#111;color:#fff;");
+console.info("%c GAMEDAY-CARD %c 0.5.0 ", "background:#cc0000;color:#fff;font-weight:700;", "background:#111;color:#fff;");
